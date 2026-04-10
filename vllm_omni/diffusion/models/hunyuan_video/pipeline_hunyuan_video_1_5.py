@@ -18,6 +18,7 @@ from torch import nn
 from transformers import AutoConfig, ByT5Tokenizer, Qwen2_5_VLTextModel, Qwen2Tokenizer
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
+from vllm_omni.diffusion.cache.teacache.backend import _teacache_init_loop_state, _teacache_should_compute
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.autoencoders.autoencoder_kl_hunyuan_video_15 import (
     DistributedAutoencoderKLHunyuanVideo15,
@@ -470,6 +471,9 @@ class HunyuanVideo15Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, Diff
         timesteps = self.scheduler.timesteps
         self._num_timesteps = len(timesteps)
 
+        # ---- TeaCache initialization ----
+        _tc_state = _teacache_init_loop_state(self)
+
         with self.progress_bar(total=len(timesteps)) as pbar:
             for i, t in enumerate(timesteps):
                 self._current_timestep = t
@@ -511,13 +515,19 @@ class HunyuanVideo15Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, Diff
                         "return_dict": False,
                     }
 
-                noise_pred = self.predict_noise_maybe_with_cfg(
-                    do_true_cfg=do_cfg and negative_kwargs is not None,
-                    true_cfg_scale=guidance_scale,
-                    positive_kwargs=positive_kwargs,
-                    negative_kwargs=negative_kwargs,
-                    cfg_normalize=req.sampling_params.cfg_normalize,
-                )
+                # ---- TeaCache: decide whether to compute or reuse ----
+                if _teacache_should_compute(_tc_state, t):
+                    noise_pred = self.predict_noise_maybe_with_cfg(
+                        do_true_cfg=do_cfg and negative_kwargs is not None,
+                        true_cfg_scale=guidance_scale,
+                        positive_kwargs=positive_kwargs,
+                        negative_kwargs=negative_kwargs,
+                        cfg_normalize=req.sampling_params.cfg_normalize,
+                    )
+                    if _tc_state is not None:
+                        _tc_state["prev_noise_pred"] = noise_pred
+                else:
+                    noise_pred = _tc_state["prev_noise_pred"]
 
                 latents = self.scheduler_step_maybe_with_cfg(
                     noise_pred,
@@ -526,6 +536,8 @@ class HunyuanVideo15Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, Diff
                     do_true_cfg=do_cfg and negative_kwargs is not None,
                 )
 
+                if _tc_state is not None:
+                    _tc_state["cnt"] += 1
                 pbar.update()
 
         self._current_timestep = None

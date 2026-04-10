@@ -10,6 +10,7 @@ interface using the hooks-based TeaCache system.
 
 from typing import Any
 
+import numpy as np
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.cache.base import CacheBackend
@@ -76,10 +77,77 @@ def enable_flux2_klein_teacache(pipeline: Any, config: DiffusionCacheConfig) -> 
     )
 
 
+def enable_hunyuan_video_15_teacache(pipeline: Any, config: DiffusionCacheConfig) -> None:
+    """
+    Enable TeaCache for HunyuanVideo15Pipeline (T2V) and HunyuanVideo15I2VPipeline (I2V).
+
+    Both pipelines share the same transformer architecture (HunyuanVideo15Transformer3DModel)
+    and use the same pipeline-level TeaCache approach to avoid FSDP/HCCL port conflicts
+    caused by HookRegistry replacing FSDP-wrapped forward().
+    """
+    teacache_config = TeaCacheConfig(
+        transformer_type="HunyuanVideo15Transformer3DModel",
+        rel_l1_thresh=config.rel_l1_thresh,
+        coefficients=config.coefficients,
+    )
+    pipeline._tea_cache_config = teacache_config
+
+    logger.info(f"TeaCache enabled for {type(pipeline).__name__} with rel_l1_thresh={teacache_config.rel_l1_thresh}")
+
+
+def _teacache_init_loop_state(pipeline: Any) -> dict | None:
+    """
+    Initialize TeaCache loop state from pipeline config.
+
+    Returns a state dict if TeaCache is configured on the pipeline, else None.
+    The state dict tracks: rescale polynomial, accumulated distance, previous
+    timestep, previous noise prediction, and step counter.
+    """
+    config = getattr(pipeline, "_tea_cache_config", None)
+    if config is None:
+        return None
+    return {
+        "config": config,
+        "rescale": np.poly1d(config.coefficients),
+        "acc_dist": 0.0,
+        "prev_t": None,
+        "prev_noise_pred": None,
+        "cnt": 0,
+    }
+
+
+def _teacache_should_compute(state: dict | None, t: Any) -> bool:
+    """
+    Decide whether to compute noise_pred or reuse the cached value.
+
+    Uses timestep value directly (no sub-module calls) to avoid triggering
+    FSDP unshard during cache evaluation. Updates state["prev_t"] in-place.
+
+    Returns True if noise_pred must be computed, False if cached value can be reused.
+    """
+    if state is None:
+        return True
+    should_compute = True
+    if state["cnt"] > 0 and state["prev_t"] is not None:
+        t_val = t.float().item()
+        prev_t_val = state["prev_t"].float().item()
+        rel_dist = abs(t_val - prev_t_val) / (abs(prev_t_val) + 1e-8)
+        rescaled = float(state["rescale"](rel_dist))
+        state["acc_dist"] += abs(rescaled)
+        if state["acc_dist"] < state["config"].rel_l1_thresh:
+            should_compute = False
+        else:
+            state["acc_dist"] = 0.0
+    state["prev_t"] = t.detach().clone()
+    return should_compute
+
+
 CUSTOM_TEACACHE_ENABLERS = {
     "BagelPipeline": enable_bagel_teacache,
     "Flux2KleinPipeline": enable_flux2_klein_teacache,
     "HunyuanImage3Pipeline": enable_hunyuan_image3_teacache,
+    "HunyuanVideo15Pipeline": enable_hunyuan_video_15_teacache,
+    "HunyuanVideo15I2VPipeline": enable_hunyuan_video_15_teacache,
 }
 
 
@@ -167,15 +235,19 @@ class TeaCacheBackend(CacheBackend):
                                 Currently not used by TeaCache but accepted for interface consistency.
             verbose: Whether to log refresh operations (default: True)
         """
-        # HunyuanImage3: tea cache state is managed inside the denoising loop,
-        # so refresh is a no-op (state is re-initialized every __call__).
+        # Pipeline-level TeaCache (HunyuanImage3, HunyuanVideo15 T2V/I2V): state is managed
+        # inside the denoising loop, so refresh is a no-op (state is re-initialized every __call__).
         if (
             hasattr(pipeline, "_tea_cache_config")
             and isinstance(pipeline._tea_cache_config, TeaCacheConfig)
-            and pipeline.__class__.__name__ == "HunyuanImage3Pipeline"
+            and pipeline.__class__.__name__
+            in ("HunyuanImage3Pipeline", "HunyuanVideo15Pipeline", "HunyuanVideo15I2VPipeline")
         ):
             if verbose:
-                logger.debug(f"TeaCache state refreshed for HunyuanImage3 (num_inference_steps={num_inference_steps})")
+                logger.debug(
+                    f"TeaCache state refreshed for {pipeline.__class__.__name__} "
+                    f"(num_inference_steps={num_inference_steps})"
+                )
             return
 
         # Extract transformer from pipeline
