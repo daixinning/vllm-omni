@@ -96,13 +96,19 @@ def parse_args() -> argparse.Namespace:
         "--cache-backend",
         type=str,
         default=None,
-        choices=["cache_dit"],
-        help="Cache backend for acceleration (Wan2.2). Default: None.",
+        choices=["cache_dit", "tea_cache"],
+        help="Cache backend for acceleration. 'cache_dit': Wan2.2 only. 'tea_cache': HunyuanVideo-1.5. Default: None.",
     )
     parser.add_argument(
         "--enable-cache-dit-summary",
         action="store_true",
         help="Enable cache-dit summary logging after diffusion forward passes.",
+    )
+    parser.add_argument(
+        "--tea-cache-thresh",
+        type=float,
+        default=0.2,
+        help="TeaCache rel_l1 threshold. Higher = more aggressive caching. Range [0.1, 0.4]. Default: 0.2.",
     )
     parser.add_argument("--output", type=str, default=None, help="Output path (mp4). Default: model-specific.")
     parser.add_argument("--fps", type=int, default=None, help="Frames per second for the output video.")
@@ -185,6 +191,29 @@ def parse_args() -> argparse.Namespace:
         choices=["fp8", "gguf"],
         help="Quantization method for the transformer (fp8 for online FP8 quantization).",
     )
+    parser.add_argument(
+        "--use-hsdp",
+        action="store_true",
+        help=("Enable Hybrid Sharded Data Parallel to shard model weights across GPUs. "),
+    )
+    parser.add_argument(
+        "--hsdp-shard-size",
+        type=int,
+        default=-1,
+        help=(
+            "Number of GPUs to shard model weights across within each replica group. "
+            "-1 (default) auto-calculates as world_size / replicate_size. "
+        ),
+    )
+    parser.add_argument(
+        "--hsdp-replicate-size",
+        type=int,
+        default=1,
+        help=(
+            "Number of replica groups for HSDP. Each replica holds a full sharded copy. "
+            "Default 1 means pure sharding (no replication). "
+        ),
+    )
     return parser.parse_args()
 
 
@@ -213,6 +242,15 @@ def main():
             "scm_steps_mask_policy": None,
             "scm_steps_policy": "dynamic",
         }
+    elif args.cache_backend == "tea_cache":
+        # TeaCache for HunyuanVideo-1.5.
+        # rel_l1_thresh controls the cache aggressiveness:
+        #   0.1 ~ minimal speedup, best quality
+        #   0.2 ~ ~1.5x speedup, minimal quality loss  (recommended)
+        #   0.4 ~ ~1.8x speedup, slight quality loss
+        cache_config = {
+            "rel_l1_thresh": args.tea_cache_thresh,
+        }
 
     # Configure parallel settings
     parallel_config = DiffusionParallelConfig(
@@ -222,6 +260,9 @@ def main():
         tensor_parallel_size=args.tensor_parallel_size,
         vae_patch_parallel_size=args.vae_patch_parallel_size,
         enable_expert_parallel=args.enable_expert_parallel,
+        use_hsdp=args.use_hsdp,
+        hsdp_shard_size=args.hsdp_shard_size,
+        hsdp_replicate_size=args.hsdp_replicate_size,
     )
 
     # Check if profiling is requested via environment variable
