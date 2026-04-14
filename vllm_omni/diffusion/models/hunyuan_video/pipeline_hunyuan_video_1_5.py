@@ -497,7 +497,12 @@ class HunyuanVideo15Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, Diff
                     }
 
                 # ---- TeaCache: decide whether to compute or reuse ----
-                if _teacache_should_compute(_tc_state, t):
+                _mod_input = None
+                if _tc_state is not None:
+                    _temb = self.transformer.time_embed(timestep, timestep_r=timestep_r)
+                    _hs = self.transformer.x_embedder(latent_model_input)
+                    _mod_input, _, _, _, _ = self.transformer.transformer_blocks[0].norm1(_hs, emb=_temb)
+                if _teacache_should_compute(_tc_state, _mod_input):
                     noise_pred = self.predict_noise_maybe_with_cfg(
                         do_true_cfg=do_cfg and negative_kwargs is not None,
                         true_cfg_scale=guidance_scale,

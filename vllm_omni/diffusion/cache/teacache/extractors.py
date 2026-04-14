@@ -931,8 +931,6 @@ def extract_stable_audio_context(
     )
 
 
-
-
 def extract_flux2_context(
     module: nn.Module,
     hidden_states: torch.Tensor,
@@ -1285,6 +1283,7 @@ EXTRACTOR_REGISTRY: dict[str, Callable] = {
     # "FluxTransformer2DModel": extract_flux_context,
     # "CogVideoXTransformer3DModel": extract_cogvideox_context,
 }
+
 
 def register_extractor(transformer_cls_name: str, extractor_fn: Callable) -> None:
     """
