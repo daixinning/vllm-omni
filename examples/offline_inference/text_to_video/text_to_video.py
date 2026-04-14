@@ -240,29 +240,6 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of HSDP replica groups.",
     )
-    parser.add_argument(
-        "--use-hsdp",
-        action="store_true",
-        help=("Enable Hybrid Sharded Data Parallel to shard model weights across GPUs. "),
-    )
-    parser.add_argument(
-        "--hsdp-shard-size",
-        type=int,
-        default=-1,
-        help=(
-            "Number of GPUs to shard model weights across within each replica group. "
-            "-1 (default) auto-calculates as world_size / replicate_size. "
-        ),
-    )
-    parser.add_argument(
-        "--hsdp-replicate-size",
-        type=int,
-        default=1,
-        help=(
-            "Number of replica groups for HSDP. Each replica holds a full sharded copy. "
-            "Default 1 means pure sharding (no replication). "
-        ),
-    )
     return parser.parse_args()
 
 
@@ -331,9 +308,6 @@ def main():
         vae_patch_parallel_size=args.vae_patch_parallel_size,
         pipeline_parallel_size=args.pipeline_parallel_size,
         enable_expert_parallel=args.enable_expert_parallel,
-        use_hsdp=args.use_hsdp,
-        hsdp_shard_size=args.hsdp_shard_size,
-        hsdp_replicate_size=args.hsdp_replicate_size,
     )
 
     profiler_enabled = args.profiler_config is not None

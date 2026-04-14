@@ -11,6 +11,7 @@ interface using the hooks-based TeaCache system.
 from typing import Any
 
 import numpy as np
+import torch
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.cache.base import CacheBackend
@@ -101,7 +102,7 @@ def _teacache_init_loop_state(pipeline: Any) -> dict | None:
 
     Returns a state dict if TeaCache is configured on the pipeline, else None.
     The state dict tracks: rescale polynomial, accumulated distance, previous
-    timestep, previous noise prediction, and step counter.
+    modulated input, previous noise prediction, and step counter.
     """
     config = getattr(pipeline, "_tea_cache_config", None)
     if config is None:
@@ -110,35 +111,34 @@ def _teacache_init_loop_state(pipeline: Any) -> dict | None:
         "config": config,
         "rescale": np.poly1d(config.coefficients),
         "acc_dist": 0.0,
-        "prev_t": None,
+        "prev_modulated_input": None,
         "prev_noise_pred": None,
         "cnt": 0,
     }
 
 
-def _teacache_should_compute(state: dict | None, t: Any) -> bool:
+def _teacache_should_compute(state: dict | None, modulated_input: torch.Tensor | None) -> bool:
     """
     Decide whether to compute noise_pred or reuse the cached value.
 
-    Uses timestep value directly (no sub-module calls) to avoid triggering
-    FSDP unshard during cache evaluation. Updates state["prev_t"] in-place.
+    Computes rel_l1 on the modulated first-block norm output (content-aware signal)
+    rather than a raw timestep delta. Updates state["prev_modulated_input"] in-place.
 
     Returns True if noise_pred must be computed, False if cached value can be reused.
     """
     if state is None:
         return True
     should_compute = True
-    if state["cnt"] > 0 and state["prev_t"] is not None:
-        t_val = t.float().item()
-        prev_t_val = state["prev_t"].float().item()
-        rel_dist = abs(t_val - prev_t_val) / (abs(prev_t_val) + 1e-8)
-        rescaled = float(state["rescale"](rel_dist))
+    if state["cnt"] > 0 and state["prev_modulated_input"] is not None:
+        prev = state["prev_modulated_input"]
+        rel_l1 = (modulated_input - prev).abs().mean() / (prev.abs().mean() + 1e-8)
+        rescaled = float(state["rescale"](rel_l1.item()))
         state["acc_dist"] += abs(rescaled)
         if state["acc_dist"] < state["config"].rel_l1_thresh:
             should_compute = False
         else:
             state["acc_dist"] = 0.0
-    state["prev_t"] = t.detach().clone()
+    state["prev_modulated_input"] = modulated_input.detach().clone()  # type: ignore[union-attr]
     return should_compute
 
 

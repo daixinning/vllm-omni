@@ -72,6 +72,7 @@ _MODEL_COEFFICIENTS = {
         -4.50000000e01,
         3.20000000e00,
         -2.00000000e-02,
+    ],
     # HunyuanVideo-1.5 transformer coefficients
     # Source: TeaCache paper (https://arxiv.org/abs/2411.19108), Table 2 / official repo
     # Maps time_embed rel_l1 distance to output rel_l1 distance for HunyuanVideo architecture.
