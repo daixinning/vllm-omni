@@ -1124,6 +1124,25 @@ def extract_hunyuan_video_15_context(
     post_patch_height = height // p_h
     post_patch_width = width // p_w
 
+    # When HSDP is active the extractor is called outside the root FSDP __call__
+    # (either directly from the pipeline TeaCache probe, or via TeaCacheHook which
+    # replaces forward() but still runs outside the FSDP pre-forward hook chain).
+    # Manually unshard root-level params (time_embed, x_embedder, etc.) and
+    # transformer_blocks[0] params (norm1) so submodules can be called directly.
+    try:
+        from torch.distributed.fsdp._fully_shard._fully_shard import FSDPModule as _FSDPModule
+    except ImportError:
+        _FSDPModule = None
+
+    block0 = module.transformer_blocks[0]
+    _root_is_fsdp = _FSDPModule is not None and isinstance(module, _FSDPModule)
+    _block0_is_fsdp = _FSDPModule is not None and isinstance(block0, _FSDPModule)
+
+    if _root_is_fsdp:
+        module.unshard()
+    if _block0_is_fsdp:
+        block0.unshard()
+
     image_rotary_emb = module.rope(hidden_states)
     temb = module.time_embed(timestep, timestep_r=timestep_r)
     hidden_states = module.x_embedder(hidden_states)
@@ -1211,9 +1230,13 @@ def extract_hunyuan_video_15_context(
     # EXTRACT MODULATED INPUT (for cache decision)
     # Use first transformer block's norm1 output on image hidden states.
     # ============================================================================
-    block0 = module.transformer_blocks[0]
     # AdaLayerNormZero returns (norm_hs, gate_msa, shift_mlp, scale_mlp, gate_mlp)
     norm_hidden_states, _, _, _, _ = block0.norm1(hidden_states, emb=temb)
+
+    if _block0_is_fsdp:
+        block0.reshard()
+    if _root_is_fsdp:
+        module.reshard()
 
     # ============================================================================
     # DEFINE TRANSFORMER EXECUTION
