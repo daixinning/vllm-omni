@@ -10,7 +10,6 @@ interface using the hooks-based TeaCache system.
 
 from typing import Any
 
-import numpy as np
 import torch
 from vllm.logger import init_logger
 
@@ -83,8 +82,10 @@ def enable_hunyuan_video_15_teacache(pipeline: Any, config: DiffusionCacheConfig
     Enable TeaCache for HunyuanVideo15Pipeline (T2V) and HunyuanVideo15I2VPipeline (I2V).
 
     Both pipelines share the same transformer architecture (HunyuanVideo15Transformer3DModel)
-    and use the same pipeline-level TeaCache approach to avoid FSDP/HCCL port conflicts
-    caused by HookRegistry replacing FSDP-wrapped forward().
+    and use the same pipeline-level TeaCache approach. Hook-based TeaCache intercepts the
+    full transformer forward before the USP SP-split hook fires, causing a shape mismatch
+    between image_rotary_emb (computed on unsharded hidden_states) and the sharded
+    hidden_states seen by transformer blocks.
     """
     teacache_config = TeaCacheConfig(
         transformer_type="HunyuanVideo15Transformer3DModel",
@@ -104,6 +105,8 @@ def _teacache_init_loop_state(pipeline: Any) -> dict | None:
     The state dict tracks: rescale polynomial, accumulated distance, previous
     modulated input, previous noise prediction, and step counter.
     """
+    import numpy as np
+
     config = getattr(pipeline, "_tea_cache_config", None)
     if config is None:
         return None
@@ -117,7 +120,7 @@ def _teacache_init_loop_state(pipeline: Any) -> dict | None:
     }
 
 
-def _teacache_should_compute(state: dict | None, modulated_input: torch.Tensor | None) -> bool:
+def _teacache_should_compute(state: dict | None, modulated_input: torch.Tensor) -> bool:
     """
     Decide whether to compute noise_pred or reuse the cached value.
 
@@ -138,7 +141,7 @@ def _teacache_should_compute(state: dict | None, modulated_input: torch.Tensor |
             should_compute = False
         else:
             state["acc_dist"] = 0.0
-    state["prev_modulated_input"] = modulated_input.detach().clone()  # type: ignore[union-attr]
+    state["prev_modulated_input"] = modulated_input.detach().clone()
     return should_compute
 
 
