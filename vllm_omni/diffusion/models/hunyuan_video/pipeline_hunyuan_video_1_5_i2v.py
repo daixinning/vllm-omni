@@ -570,13 +570,14 @@ class HunyuanVideo15I2VPipeline(
                         "return_dict": False,
                     }
 
-                noise_pred = self.predict_noise_maybe_with_cfg(
-                    do_true_cfg=do_cfg and negative_kwargs is not None,
-                    true_cfg_scale=guidance_scale,
-                    positive_kwargs=positive_kwargs,
-                    negative_kwargs=negative_kwargs,
-                    cfg_normalize=req.sampling_params.cfg_normalize,
-                )
+                with torch.profiler.record_function(f"dit_step_{i}"):
+                    noise_pred = self.predict_noise_maybe_with_cfg(
+                        do_true_cfg=do_cfg and negative_kwargs is not None,
+                        true_cfg_scale=guidance_scale,
+                        positive_kwargs=positive_kwargs,
+                        negative_kwargs=negative_kwargs,
+                        cfg_normalize=req.sampling_params.cfg_normalize,
+                    )
 
                 latents = self.scheduler_step_maybe_with_cfg(
                     noise_pred,
@@ -596,7 +597,8 @@ class HunyuanVideo15I2VPipeline(
             output = latents
         else:
             latents = latents.to(self.vae.dtype) / self.vae.config.scaling_factor
-            output = self.vae.decode(latents, return_dict=False)[0]
+            with torch.profiler.record_function("vae_decode"):
+                output = self.vae.decode(latents, return_dict=False)[0]
 
         return DiffusionOutput(output=output)
 

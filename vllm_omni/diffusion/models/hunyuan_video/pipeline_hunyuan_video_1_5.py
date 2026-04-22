@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import re
 from collections.abc import Iterable
 from typing import Any
@@ -25,6 +26,7 @@ from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.hunyuan_video.hunyuan_video_15_transformer import HunyuanVideo15Transformer3DModel
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin
+from vllm_omni.diffusion.models.progress_bar import _is_rank_zero
 from vllm_omni.diffusion.models.t5_encoder import T5EncoderModel
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
@@ -33,6 +35,7 @@ from vllm_omni.platforms import current_omni_platform
 
 logger = logging.getLogger(__name__)
 
+DEBUG_PERF = os.getenv("VLLM_OMNI_DEBUG_PERF", "0") == "1"
 
 def retrieve_latents(
     encoder_output: torch.Tensor,
@@ -403,6 +406,11 @@ class HunyuanVideo15Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, Diff
         if generator is None and req.sampling_params.seed is not None:
             generator = torch.Generator(device=device).manual_seed(req.sampling_params.seed)
 
+        if DEBUG_PERF:
+            current_omni_platform.synchronize()
+            _t_pipeline_start = time.perf_counter()
+            _t_text_enc_start = _t_pipeline_start
+
         (
             prompt_embeds,
             prompt_embeds_mask,
@@ -419,6 +427,10 @@ class HunyuanVideo15Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, Diff
             negative_prompt=negative_prompt,
             do_classifier_free_guidance=do_cfg,
         )
+
+        if DEBUG_PERF:
+            current_omni_platform.synchronize()
+            _t_text_enc_ms = (time.perf_counter() - _t_text_enc_start) * 1000
 
         batch_size = prompt_embeds.shape[0]
 
@@ -450,6 +462,10 @@ class HunyuanVideo15Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, Diff
         self.scheduler.set_timesteps(sigmas=sigmas, device=device)
         timesteps = self.scheduler.timesteps
         self._num_timesteps = len(timesteps)
+
+        if DEBUG_PERF:
+            current_omni_platform.synchronize()
+            _t_denoise_start = time.perf_counter()
 
         with self.progress_bar(total=len(timesteps)) as pbar:
             for i, t in enumerate(timesteps):
@@ -509,16 +525,41 @@ class HunyuanVideo15Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, Diff
 
                 pbar.update()
 
+        if DEBUG_PERF:
+            current_omni_platform.synchronize()
+            _t_denoise_ms = (time.perf_counter() - _t_denoise_start) * 1000
+
         self._current_timestep = None
 
         if current_omni_platform.is_available():
             current_omni_platform.empty_cache()
+
+        if DEBUG_PERF:
+            _t_decode_start = time.perf_counter()
 
         if output_type == "latent":
             output = latents
         else:
             latents = latents.to(self.vae.dtype) / self.vae.config.scaling_factor
             output = self.vae.decode(latents, return_dict=False)[0]
+
+        if DEBUG_PERF:
+            current_omni_platform.synchronize()
+            _t_decode_ms = (time.perf_counter() - _t_decode_start) * 1000
+            _t_pipeline_wall_ms = (time.perf_counter() - _t_pipeline_start) * 1000
+            _t_stages_sum = _t_text_enc_ms + _t_denoise_ms + _t_decode_ms
+
+            if _is_rank_zero():
+                logger.info(
+                    "Pipeline timing summary: "
+                    "TextEncoding=%.2f ms, "
+                    "Denoising=%.2f ms, Decoding=%.2f ms, "
+                    "Pipeline=%.2f ms",
+                    _t_text_enc_ms,
+                    _t_denoise_ms,
+                    _t_decode_ms,
+                    _t_pipeline_wall_ms,
+                )
 
         return DiffusionOutput(output=output)
 

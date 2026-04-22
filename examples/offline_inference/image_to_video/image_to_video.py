@@ -275,7 +275,16 @@ def main():
         }
 
     # Check if profiling is requested via environment variable
-    profiler_enabled = bool(os.getenv("VLLM_TORCH_PROFILER_DIR"))
+    profiler_dir = os.getenv("VLLM_TORCH_PROFILER_DIR")
+    profiler_enabled = bool(profiler_dir)
+    profiler_config = None
+    if profiler_enabled:
+        from vllm.config import ProfilerConfig
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir=profiler_dir,
+            torch_profiler_with_stack=False,
+        )
     parallel_config = DiffusionParallelConfig(
         ulysses_degree=args.ulysses_degree,
         ring_degree=args.ring_degree,
@@ -300,6 +309,7 @@ def main():
         cache_backend=args.cache_backend,
         cache_config=cache_config,
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
+        profiler_config=profiler_config,
     )
 
     if profiler_enabled:
@@ -521,20 +531,40 @@ def main():
 
     if profiler_enabled:
         print("\n[Profiler] Stopping profiler and collecting results...")
-        profile_results = omni.stop_profile()
-        if profile_results and isinstance(profile_results, dict):
-            traces = profile_results.get("traces", [])
-            print("\n" + "=" * 60)
-            print("PROFILING RESULTS:")
-            for rank, trace in enumerate(traces):
-                print(f"\nRank {rank}:")
-                if trace:
-                    print(f"  • Trace: {trace}")
-            if not traces:
-                print("  No traces collected.")
-            print("=" * 60)
-        else:
-            print("[Profiler] No valid profiling data returned.")
+        omni.stop_profile()
+
+        # Parse profiling data for MindStudio Insight.
+        # profiler_dir contains rank subdirs (diffusion_rank0, diffusion_rank1, ...),
+        # each of which holds the actual profiling data. analyse() is called per rank dir.
+        print("\n[Profiler] Parsing profiling data for MindStudio Insight...")
+        try:
+            import shutil
+            import torch_npu.profiler.profiler as _npu_profiler
+            rank_dirs = sorted(
+                os.path.join(profiler_dir, d)
+                for d in os.listdir(profiler_dir)
+                if os.path.isdir(os.path.join(profiler_dir, d))
+            )
+            if not rank_dirs:
+                print("[Profiler] No rank directories found under", profiler_dir)
+            for rank_dir in rank_dirs:
+                print(f"  Analysing {rank_dir} ...")
+                try:
+                    _npu_profiler.analyse(rank_dir)
+                    print(f"  Done: {rank_dir}")
+                    # Remove raw data inside each profiling snapshot dir,
+                    # keep only ASCEND_PROFILER_OUTPUT
+                    for snapshot in os.scandir(rank_dir):
+                        if not snapshot.is_dir():
+                            continue
+                        for entry in os.scandir(snapshot.path):
+                            if entry.name != "ASCEND_PROFILER_OUTPUT":
+                                shutil.rmtree(entry.path) if entry.is_dir() else os.remove(entry.path)
+                    print(f"  Cleaned raw data in {rank_dir}")
+                except Exception as e:
+                    print(f"  Failed to analyse {rank_dir}: {e}")
+        except ImportError:
+            print("[Profiler] torch_npu not available, skipping MindStudio parse.")
 
 
 if __name__ == "__main__":

@@ -53,10 +53,10 @@ class NPUTorchProfilerWrapper(OmniTorchProfilerWrapper):
             export_type=torch_npu.profiler.ExportType.Text,
             profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
             msprof_tx=False,
-            aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+            aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
             l2_cache=False,
             op_attr=False,
-            data_simplification=True,
+            data_simplification=False,
             record_op_args=False,
             gc_detect_threshold=None,
         )
