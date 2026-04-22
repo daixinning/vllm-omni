@@ -687,17 +687,127 @@ class TestEngine:
 
 @pytest.mark.cpu
 class TestIPC:
-    def test_pack_unpack_runner_output_shm(self):
-        tensor = torch.zeros(300_000, dtype=torch.float32)
+    """Tests for SHM-based tensor streaming IPC."""
+
+    def test_pack_unpack_small_tensor_inline(self):
+        """Small tensors below threshold should be transferred inline."""
+        # Below 1MB threshold
+        tensor = torch.zeros(100, dtype=torch.float32)
         output = RunnerOutput(req_id="req-1", finished=True, result=DiffusionOutput(output=tensor))
 
-        packed = pack_diffusion_output_shm(output)
-        assert isinstance(packed.result.output, dict)
-        assert packed.result.output["__tensor_shm__"] is True
+        result_mq = _MockMessageQueue()
+        ack_mq = _MockMessageQueue()
 
-        unpacked = unpack_diffusion_output_shm(packed)
-        assert isinstance(unpacked.result.output, torch.Tensor)
-        torch.testing.assert_close(unpacked.result.output, tensor)
+        pack_diffusion_output_shm(output, result_mq, ack_mq)
+
+        # Should send output + header (no SHM fields)
+        assert len(result_mq.queue) == 2
+        assert result_mq.queue[1] == {"__shm_fields__": []}
+
+        # Unpack handles all dequeue internally
+        result = unpack_diffusion_output_shm(result_mq, ack_mq)
+        assert torch.equal(result.result.output, tensor)
+
+    def test_pack_unpack_large_tensor_shm_streaming(self):
+        """Large tensors above threshold should be streamed via SHM."""
+        import threading
+
+        # Above 1MB threshold: 300k float32 = 1.2MB
+        tensor = torch.zeros(3_000_000, dtype=torch.float32)  # ~12MB
+        output = RunnerOutput(req_id="req-1", finished=True, result=DiffusionOutput(output=tensor))
+
+        result_mq = _MockMessageQueue()
+        ack_mq = _MockMessageQueue()
+
+        unpack_result = [None]
+        unpack_error = [None]
+
+        def consumer():
+            try:
+                # unpack handles all dequeue internally
+                unpack_result[0] = unpack_diffusion_output_shm(result_mq, ack_mq)
+            except Exception as e:
+                unpack_error[0] = e
+
+        t = threading.Thread(target=consumer)
+        t.start()
+        pack_diffusion_output_shm(output, result_mq, ack_mq)
+        t.join(timeout=30)
+
+        assert unpack_error[0] is None, f"Consumer error: {unpack_error[0]}"
+        result = unpack_result[0]
+        assert result is not None
+        assert isinstance(result.result.output, torch.Tensor)
+        torch.testing.assert_close(result.result.output, tensor)
+
+    def test_pack_unpack_non_diffusion_output(self):
+        """Non-DiffusionOutput objects should be passed through."""
+        output = {"some": "data"}
+
+        result_mq = _MockMessageQueue()
+        ack_mq = _MockMessageQueue()
+
+        pack_diffusion_output_shm(output, result_mq, ack_mq)
+
+        assert len(result_mq.queue) == 2
+        assert result_mq.queue[0] == output
+        assert result_mq.queue[1] == {"__shm_fields__": []}
+
+    def test_pack_unpack_bfloat16_tensor(self):
+        """bfloat16 tensors should round-trip through SHM without data loss."""
+        import threading
+
+        # Above 1MB threshold, bfloat16 dtype
+        tensor = torch.randn(1_000_000, dtype=torch.bfloat16)
+        output = RunnerOutput(req_id="req-1", finished=True, result=DiffusionOutput(output=tensor))
+
+        result_mq = _MockMessageQueue()
+        ack_mq = _MockMessageQueue()
+
+        unpack_result = [None]
+        unpack_error = [None]
+
+        def consumer():
+            try:
+                unpack_result[0] = unpack_diffusion_output_shm(result_mq, ack_mq)
+            except Exception as e:
+                unpack_error[0] = e
+
+        t = threading.Thread(target=consumer)
+        t.start()
+        pack_diffusion_output_shm(output, result_mq, ack_mq)
+        t.join(timeout=30)
+
+        assert unpack_error[0] is None, f"Consumer error: {unpack_error[0]}"
+        result = unpack_result[0]
+        assert result is not None
+        assert result.result.output.dtype == torch.bfloat16
+        torch.testing.assert_close(result.result.output, tensor)
+
+
+class _MockMessageQueue:
+    """Simple mock for MessageQueue used in IPC testing."""
+
+    def __init__(self):
+        import queue
+
+        self._q = queue.Queue()
+        self.queue = []  # kept for non-threaded inspection in tests
+
+    def enqueue(self, item):
+        self.queue.append(item)
+        self._q.put(item)
+
+    def dequeue(self, timeout=None):
+        import queue
+
+        try:
+            item = self._q.get(timeout=timeout if timeout is not None else 30)
+            if self.queue and self.queue[0] is item:
+                self.queue.pop(0)
+            return item
+        except queue.Empty:
+            raise TimeoutError("Queue is empty")
 
 
 @pytest.mark.cpu
