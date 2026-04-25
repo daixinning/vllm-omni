@@ -502,6 +502,7 @@ class WorkerProc:
         od_config: OmniDiffusionConfig,
         gpu_id: int,
         broadcast_handle,
+        ack_handle,
         wake_event: mp.Event,
         worker_extension_cls: str | None = None,
         custom_pipeline_args: dict[str, Any] | None = None,
@@ -518,6 +519,7 @@ class WorkerProc:
 
         self.result_mq = None
         self.result_mq_handle = None
+        self.ack_mq = None
 
         # Setup result sender (only for rank 0)
         if gpu_id == 0:
@@ -525,6 +527,9 @@ class WorkerProc:
             self.result_mq_handle = self.result_mq.export_handle()
             WorkerProc._shared_result_handle = self.result_mq_handle
             logger.info(f"Worker {gpu_id} created result MessageQueue")
+            # Setup ACK receiver for backpressure control (rank 0 sends results)
+            self.ack_mq = MessageQueue.create_from_handle(ack_handle, 0)
+            logger.info(f"Worker {gpu_id} created ACK MessageQueue")
         else:
             handle = getattr(WorkerProc, "_shared_result_handle", None)
             if handle:
@@ -560,11 +565,10 @@ class WorkerProc:
                 self.result_mq.enqueue(output)
                 return
             try:
-                pack_diffusion_output_shm(output)
+                pack_diffusion_output_shm(output, self.result_mq, self.ack_mq)
             except Exception as e:
-                if hasattr(output, "output"):
-                    logger.warning("SHM pack failed for model output: %s", e)
-            self.result_mq.enqueue(output)
+                logger.warning("SHM pack failed: %s", e)
+                raise
 
     def recv_message(self):
         """Receive messages from broadcast queue."""
@@ -668,6 +672,7 @@ class WorkerProc:
         od_config: OmniDiffusionConfig,
         pipe_writer: mp.connection.Connection,
         broadcast_handle,
+        ack_handle,
         wake_event: mp.Event,
         worker_extension_cls: str | None = None,
         custom_pipeline_args: dict[str, Any] | None = None,
@@ -680,6 +685,7 @@ class WorkerProc:
             od_config,
             gpu_id=rank,
             broadcast_handle=broadcast_handle,
+            ack_handle=ack_handle,
             wake_event=wake_event,
             worker_extension_cls=worker_extension_cls,
             custom_pipeline_args=custom_pipeline_args,
