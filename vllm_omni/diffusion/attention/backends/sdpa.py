@@ -150,4 +150,26 @@ class SDPAImpl(AttentionImpl):
         value: torch.Tensor,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        return self._forward_impl(query, key, value, attn_metadata, mask_mode="full_qk")
+        import torch_npu
+        attn_mask = attn_metadata.attn_mask if attn_metadata else None
+        # Skip all-valid mask
+        if attn_mask is not None and torch.all(attn_mask != 0):
+            attn_mask = None
+        # Use actual_seq_lengths_kv to avoid materializing [B,1,Sq,Skv] mask.
+        # npu_prompt_flash_attention is not supported on Ascend 950; use
+        # npu_fused_infer_attention_score which handles both prompt and incr paths.
+        if attn_mask is not None and attn_mask.ndim == 2:
+            actual_seq_lengths_kv = attn_mask.to(torch.bool).sum(dim=1).tolist()
+        else:
+            actual_seq_lengths_kv = None
+        # query/key/value are BSND -- no transpose needed for BSND layout
+        out, _ = torch_npu.npu_fused_infer_attention_score(
+            query.contiguous(), key.contiguous(), value.contiguous(),
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            num_heads=query.shape[2],
+            scale=self.softmax_scale,
+            input_layout="BSND",
+            pre_tokens=2147483647,
+            next_tokens=2147483647,
+        )
+        return out
