@@ -142,7 +142,7 @@ class HunyuanVideo15I2VPipeline(
         )
 
         self.vae = DistributedAutoencoderKLHunyuanVideo.from_pretrained(
-            model, subfolder="vae", torch_dtype=torch.float32, local_files_only=local_files_only
+            model, subfolder="vae", torch_dtype=torch.float16, local_files_only=local_files_only
         ).to(self.device)
 
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
