@@ -128,23 +128,6 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
         if self._result_mq is None:
             raise RuntimeError("Result queue not initialized")
 
-    def _dequeue_one_with_failure_polling(self, deadline: float | None, method: str) -> Any:
-        """Block until one result message, polling ``is_failed`` between chunk timeouts."""
-        while True:
-            if deadline is None:
-                chunk_timeout = _DEQUEUE_TIMEOUT_S
-            else:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(f"RPC call to {method} timed out.")
-                chunk_timeout = min(_DEQUEUE_TIMEOUT_S, remaining)
-            try:
-                return self._result_mq.dequeue(timeout=chunk_timeout)
-            except (TimeoutError, zmq.error.Again):
-                if self.is_failed:
-                    raise EngineDeadError()
-                continue
-
     def _launch_workers(self, broadcast_handle, wake_events, ack_handle):
         od_config = self.od_config
         logger.info("Starting server...")

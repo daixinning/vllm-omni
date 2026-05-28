@@ -731,14 +731,12 @@ class WorkerProc:
     def return_result(self, output: Any):
         """Reply to client, only on rank 0."""
         if self.result_mq is not None:
-            if isinstance(output, OmniACK):
-                self.result_mq.enqueue(output)
-                return
             try:
                 pack_diffusion_output_shm(output, self.result_mq, self.ack_mq)
             except Exception as e:
-                logger.warning("SHM pack failed: %s", e)
-                raise
+                logger.warning("SHM pack failed, falling back to inline: %s", e)
+                self.result_mq.enqueue(output)
+                self.result_mq.enqueue({"__shm_fields__": []})
 
     def recv_message(self):
         """Receive messages from broadcast queue."""
